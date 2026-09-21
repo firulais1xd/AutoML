@@ -1053,3 +1053,49 @@ def scatter_plain(emb: pd.DataFrame, titulo: str, height: int = 430) -> go.Figur
         hovertemplate="%{x:.2f}, %{y:.2f}<extra></extra>"))
     return base_layout(fig, titulo, height=height, showlegend=False,
                        xtitle=emb.columns[0], ytitle=emb.columns[1])
+
+
+def heatmap_dbscan_grid(grid: pd.DataFrame, valor: str = "silueta",
+                        rec: dict | None = None) -> go.Figure:
+    """Mapa eps × min_samples: silueta (secuencial) con el punto recomendado."""
+    if grid is None or grid.empty:
+        return _empty("Sin resultados de la rejilla")
+    piv = grid.pivot_table(index="min_samples", columns="eps", values=valor)
+    grupos = grid.pivot_table(index="min_samples", columns="eps", values="clusters")
+    ruido = grid.pivot_table(index="min_samples", columns="eps", values="%_ruido")
+    custom = np.dstack([grupos.to_numpy(), ruido.to_numpy()])
+    titulo = ("Silueta (sin ruido) por combinación" if valor == "silueta"
+              else "% de ruido por combinación")
+    fig = go.Figure(go.Heatmap(
+        z=piv.to_numpy(), x=[f"{e:.2f}" for e in piv.columns],
+        y=[str(m) for m in piv.index], colorscale=SEQ_BLUE,
+        customdata=custom, hoverongaps=False,
+        colorbar=dict(thickness=10, outlinewidth=0, len=0.85,
+                      tickfont=dict(size=10, color=TEXT_2)),
+        hovertemplate="eps %{x} · min_samples %{y}<br>" + valor +
+                      " %{z:.3f}<br>grupos %{customdata[0]:.0f} · ruido %{customdata[1]:.1f}%"
+                      "<extra></extra>"))
+    if rec:
+        fig.add_scatter(x=[f"{rec['eps']:.2f}"], y=[str(rec["min_samples"])],
+                        mode="markers+text", text=["recomendado"], textposition="top center",
+                        textfont=dict(size=11, color=CAT[7]),
+                        marker=dict(symbol="star", size=16, color=CAT[7],
+                                    line=dict(color=SURFACE, width=1.5)),
+                        showlegend=False, hoverinfo="skip")
+    fig = base_layout(fig, titulo, height=320, xtitle="eps", ytitle="min_samples")
+    fig.update_yaxes(showgrid=False, type="category")
+    fig.update_xaxes(type="category", tickangle=-45, nticks=18)
+    return fig
+
+
+def heatmap_crosstab(tabla: pd.DataFrame, titulo: str) -> go.Figure:
+    """Tabla cruzada cluster × clase real como mapa de calor secuencial."""
+    z = tabla.to_numpy()
+    fig = go.Figure(go.Heatmap(
+        z=z, x=[f"real {c}" for c in tabla.columns],
+        y=[("ruido" if int(i) == -1 else f"cluster {i}") for i in tabla.index],
+        colorscale=SEQ_BLUE, text=z, texttemplate="%{text}", textfont=dict(size=13),
+        showscale=False, hovertemplate="%{y} · %{x}: %{z}<extra></extra>"))
+    fig = base_layout(fig, titulo, height=max(220, 44 * len(tabla) + 110))
+    fig.update_yaxes(showgrid=False, autorange="reversed")
+    return fig

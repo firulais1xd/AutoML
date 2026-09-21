@@ -105,6 +105,17 @@ def md2html(texto: str) -> str:
     return t
 
 
+def pestañas(etiquetas: list[str], clave: str):
+    """
+    Pestañas que recuerdan cuál estaba abierta entre recargas. Sin clave, Streamlit
+    vuelve a la primera cada vez que cambia algún control.
+    """
+    try:
+        return st.tabs(etiquetas, key=clave)
+    except TypeError:          # versiones de Streamlit sin soporte de 'key'
+        return st.tabs(etiquetas)
+
+
 def fallo_seccion(nombre: str, err: Exception):
     """Muestra un error acotado a una pestaña sin tumbar el resto de la app."""
     st.error(f"La sección **{nombre}** no pudo mostrarse completa con los datos "
@@ -322,8 +333,8 @@ num_cols = [c for c in df.columns if is_numeric(df[c])]
 cat_cols = [c for c in df.columns if is_texty(df[c])]
 date_cols = [c for c in df.columns if is_datetime(df[c])]
 
-tabs = st.tabs(["📁 Datos", "🔍 Calidad", "🧪 ETL", "📊 Análisis", "🤖 Modelos",
-                "⭐ Variables clave", "🧩 Clusters", "💡 Insights", "📤 Exportar"])
+tabs = pestañas(["📁 Datos", "🔍 Calidad", "🧪 ETL", "📊 Análisis", "🤖 Modelos",
+                "⭐ Variables clave", "🧩 Clusters", "💡 Insights", "📤 Exportar"], "tabs_main")
 
 # =========================================================================== #
 # 1 · DATOS
@@ -387,8 +398,8 @@ with tabs[1]:
                 f"<b>Acción:</b> {md2html(f['accion_sugerida'])}</p></div>", unsafe_allow_html=True)
 
         st.divider()
-        sub = st.tabs(["Perfil por columna", "Faltantes", "Duplicados", "Outliers",
-                       "Alertas"])
+        sub = pestañas(["Perfil por columna", "Faltantes", "Duplicados", "Outliers",
+                       "Alertas"], "sub_calidad")
 
         with sub[0]:
             prof = _profile(df)
@@ -623,8 +634,8 @@ with tabs[2]:
 with tabs[3]:
     try:
         st.subheader("Análisis exploratorio")
-        sub = st.tabs(["Resumen estadístico", "Distribuciones", "Correlaciones",
-                       "Relación con el objetivo", "Bivariado", "Temporal"])
+        sub = pestañas(["Resumen estadístico", "Distribuciones", "Correlaciones",
+                       "Relación con el objetivo", "Bivariado", "Temporal"], "sub_eda")
 
         with sub[0]:
             if num_cols:
@@ -1017,7 +1028,7 @@ with tabs[5]:
             nat = importance.native_importance(r.pipeline, feats)
             frames = {"nativo": nat}
 
-            sub = st.tabs(["Ranking", "Consenso", "SHAP", "Efecto marginal", "Coeficientes"])
+            sub = pestañas(["Ranking", "Consenso", "SHAP", "Efecto marginal", "Coeficientes"], "sub_vars")
 
             with sub[0]:
                 c1, c2 = st.columns(2)
@@ -1156,15 +1167,32 @@ with tabs[6]:
         def _set_feats(lista):
             SS[k_feats] = [c for c in lista if c in candidatas_cl]
 
+        k_ref = wkey("cl_ref")
+        opciones_ref = ["(ninguna)"] + [c for c in df.columns
+                                        if 2 <= df[c].nunique(dropna=True) <= 30]
+        if k_ref not in SS:
+            SS[k_ref] = clustering.detect_reference_column(df) or "(ninguna)"
+        if SS[k_ref] not in opciones_ref:
+            SS[k_ref] = "(ninguna)"
+
+        def _excluir():
+            ex = [SS.training.target] if SS.training is not None else []
+            ref_ = SS.get(k_ref)
+            if ref_ and ref_ != "(ninguna)":
+                ex.append(ref_)
+            return ex
+
         def _cb_sugeridas():
-            excl = [SS.training.target] if SS.training is not None else []
             sel, _ = clustering.suggest_features(
-                df, roles, exclude=excl,
-                include_categorical=SS.get(wkey("cl_inc_cat"), False))
+                df, roles, exclude=_excluir(),
+                include_categorical=SS.get(wkey("cl_inc_cat"), False),
+                drop_redundant=SS.get(wkey("cl_redund"), False))
             _set_feats(sel)
 
         def _cb_numericas():
-            _set_feats([c for c in num_cols if roles[c].role not in ("id", "constante")])
+            ex = set(_excluir())
+            _set_feats([c for c in num_cols if roles[c].role not in ("id", "constante")
+                        and c not in ex and not clustering.is_label_like(df, c)])
 
         def _cb_modelo():
             tr_ = SS.training
@@ -1181,24 +1209,41 @@ with tabs[6]:
             _set_feats([])
 
         if k_feats not in SS:
-            excl0 = [SS.training.target] if SS.training is not None else []
-            SS[k_feats] = clustering.suggest_features(df, roles, exclude=excl0)[0]
+            SS[k_feats] = clustering.suggest_features(df, roles, exclude=_excluir())[0]
 
         st.markdown("#### 1 · Variables clave para segmentar")
         b1, b2, b3, b4, b5 = st.columns([1.1, 1.1, 1.1, 0.8, 1.6])
         b1.button("✨ Sugeridas", on_click=_cb_sugeridas, width="stretch",
-                  help="Numéricas no redundantes y con más variabilidad; excluye IDs, "
-                       "constantes y la variable objetivo.")
+                  help="Todas las numéricas útiles; excluye IDs, constantes, la "
+                       "variable objetivo y la de referencia (etiqueta real).")
         b2.button("🔢 Todas las numéricas", on_click=_cb_numericas, width="stretch")
         b3.button("⭐ Top del modelo", on_click=_cb_modelo, width="stretch",
                   disabled=SS.training is None,
                   help="Las 8 variables más importantes del mejor modelo entrenado.")
         b4.button("🧹 Limpiar", on_click=_cb_limpiar, width="stretch")
         b5.checkbox("Incluir categóricas en la sugerencia", key=wkey("cl_inc_cat"))
+        b5.checkbox("Quitar redundantes (|r| > 0,85)", key=wkey("cl_redund"),
+                    help="Si dos variables miden casi lo mismo, pesan doble en la "
+                         "distancia. Por defecto se conservan y solo se avisa.")
 
         cl_feats = st.multiselect(
             "Variables seleccionadas (agrega o quita las que consideres clave)",
             candidatas_cl, key=k_feats)
+
+        r1_, r2_ = st.columns([2, 3])
+        r1_.selectbox(
+            "Variable de referencia para validar (opcional)", opciones_ref, key=k_ref,
+            help="Una etiqueta real que NO se usa para agrupar (p. ej. 'cultivar'). "
+                 "Sirve para medir qué tanto coinciden los clusters con ella: ARI, "
+                 "tasa de acierto y tabla cruzada.")
+        ref_col = SS[k_ref] if SS[k_ref] != "(ninguna)" else None
+        if ref_col and ref_col in cl_feats:
+            r2_.error(f"**{ref_col}** es la variable de referencia y también está entre "
+                      "las variables para agrupar: eso es darle la respuesta al algoritmo "
+                      "(fuga de información). Quítala de la lista.")
+        elif ref_col:
+            r2_.info(f"Los clusters se validarán contra **{ref_col}**, que no participa "
+                     "en el agrupamiento.")
 
         with st.expander("⚙️ Preprocesamiento"):
             p1, p2, p3 = st.columns(3)
@@ -1246,9 +1291,11 @@ with tabs[6]:
                 loadings = clustering.pca_loadings(M, nombres_t, min(3, M.shape[1]))
                 prog.progress(0.55, "Proyección t-SNE (la más lenta)…")
                 tsne_emb, tsne_info = clustering.project(M[idx_vis], "t-SNE", 2)
-                prog.progress(0.92, "Sugiriendo eps para DBSCAN…")
+                prog.progress(0.85, "Rejilla eps × min_samples para DBSCAN…")
                 eps_sug = clustering.suggest_eps(M, 5)
                 kd = clustering.kdistance_curve(M, 5)
+                db_grid = clustering.dbscan_grid(M)
+                db_rec = clustering.recommend_dbscan(db_grid, 15.0)
                 k_rec = int(ks.loc[ks["silueta"].idxmax(), "k"]) if not ks.empty else 3
                 SS.clx = {"clave": clave_actual, "M": M, "Xu": Xu, "pre": pre,
                           "feats": list(cl_feats), "hopkins": hop, "ks": ks,
@@ -1256,11 +1303,14 @@ with tabs[6]:
                           "pca_var": pca_var, "loadings": loadings,
                           "tsne_emb": tsne_emb, "tsne_info": tsne_info,
                           "eps_sug": eps_sug, "kd": kd, "k_rec": k_rec,
+                          "db_grid": db_grid, "db_rec": db_rec,
                           "otros": {}}
                 # los parámetros por algoritmo arrancan en los valores recomendados
                 for k_ in ("km_k", "hc_k"):
                     SS[wkey(k_)] = k_rec
-                SS[wkey("db_eps")] = float(min(max(round(eps_sug, 3), 0.01), 100.0))
+                eps0 = db_rec["eps"] if db_rec else eps_sug
+                SS[wkey("db_eps")] = float(min(max(round(eps0, 4), 0.0001), 10000.0))
+                SS[wkey("db_ms")] = int(db_rec["min_samples"]) if db_rec else 5
                 prog.empty()
                 clx, vigente = SS.clx, True
             except Exception as e:
@@ -1349,6 +1399,33 @@ with tabs[6]:
                     else:
                         table(sizes)
 
+            ref_vals = (df.loc[Xu.index, ref_col] if ref_col and ref_col in df.columns
+                        else None)
+
+            def _validar(labels, prefijo, titulo):
+                """Compara los clusters contra la variable de referencia."""
+                if ref_vals is None:
+                    return None
+                v = clustering.external_validation(labels, ref_vals)
+                st.markdown(f"**Validación contra `{ref_col}`** (no se usó para agrupar)")
+                c = st.columns(3)
+                kpi(c[0], "ARI", f"{v['ari']:.3f}", "1 = idéntico · 0 = azar")
+                kpi(c[1], "Tasa de acierto", f"{v['acierto']:.1%}",
+                    "mejor emparejamiento cluster → clase")
+                kpi(c[2], "NMI", f"{v['nmi']:.3f}", "información compartida (0 a 1)")
+                g1, g2 = st.columns([3, 2])
+                with g1:
+                    chart(viz.heatmap_crosstab(v["tabla"], f"{titulo} vs {ref_col}"),
+                          key=f"{prefijo}_xtab")
+                with g2:
+                    st.caption("Los números de cluster son arbitrarios: lo que importa es "
+                               "que cada cluster concentre una sola clase real.")
+                    st.markdown("**Emparejamiento encontrado**")
+                    table(pd.DataFrame([{"cluster": ("ruido" if k == -1 else k),
+                                         f"{ref_col}": val}
+                                        for k, val in v["emparejamiento"].items()]))
+                return v
+
             # --- resultados vigentes de los tres algoritmos principales ---
             km_k = int(SS.get(wkey("km_k"), clx["k_rec"]))
             db_eps = float(SS.get(wkey("db_eps"), clx["eps_sug"]))
@@ -1356,9 +1433,9 @@ with tabs[6]:
             hc_k = int(SS.get(wkey("hc_k"), clx["k_rec"]))
             hc_m = SS.get(wkey("hc_m"), "ward")
 
-            sub = st.tabs(["① Variables clave", "② Codo y silueta", "③ K-Means",
+            sub = pestañas(["① Variables clave", "② Codo y silueta", "③ K-Means",
                            "④ DBSCAN", "⑤ Árbol jerárquico", "⑥ PCA y t-SNE",
-                           "⑦ Comparar y perfilar"])
+                           "⑦ Comparar y perfilar"], "sub_clusters")
 
             # ---------------- ① Variables clave ----------------
             with sub[0]:
@@ -1466,6 +1543,7 @@ with tabs[6]:
                                    "suma de distancias al centro"))
                     _vistas(res_km.labels, "km")
                     _tamanos_y_centroides(res_km.labels, "km")
+                    _validar(res_km.labels, "km", "K-Means")
                     with st.expander("Silueta por registro"):
                         sil = clustering.silhouette_by_point(M, res_km.labels)
                         chart(viz.silhouette_plot(sil), key="km_silp")
@@ -1476,16 +1554,80 @@ with tabs[6]:
                             "admite formas irregulares y marca como **ruido** (−1) los "
                             "puntos aislados. Se controla con `eps` (radio de vecindad) y "
                             "`min_samples` (vecinos mínimos para formar un núcleo).")
+                # --- búsqueda en rejilla eps × min_samples ---
+                st.markdown("##### Búsqueda de eps y min_samples")
+                g_ = clx.get("db_grid")
+                q1, q2 = st.columns([1, 3])
+                ruido_max = q1.slider("Ruido máximo aceptable (%)", 1, 50, 15,
+                                      key=wkey("db_maxnoise"),
+                                      help="Menos ruido no siempre es mejor (DBSCAN deja de "
+                                           "detectar atípicos); demasiado ruido tampoco.")
+                rec = clustering.recommend_dbscan(g_, float(ruido_max)) if g_ is not None else None
+
+                def _usar_rec(r=rec):
+                    if r:
+                        SS[wkey("db_eps")] = float(min(max(r["eps"], 0.0001), 10000.0))
+                        SS[wkey("db_ms")] = int(r["min_samples"])
+
+                with q2:
+                    if rec:
+                        st.success(f"**Recomendado:** eps = {rec['eps']:.3f}, "
+                                   f"min_samples = {rec['min_samples']} → {rec['clusters']} "
+                                   f"grupos, {rec['%_ruido']:.1f}% de ruido, silueta "
+                                   f"{rec['silueta']:.3f} (la mejor silueta con ruido ≤ "
+                                   f"{ruido_max}%).")
+                        st.button("Usar esta combinación", on_click=_usar_rec,
+                                  key=wkey("btn_db_rec"))
+                    else:
+                        st.warning("Ninguna combinación produjo 2 o más grupos: amplía el "
+                                   "rango de eps.")
+                if g_ is not None and not g_.empty:
+                    h1_, h2_ = st.columns(2)
+                    with h1_:
+                        chart(viz.heatmap_dbscan_grid(g_, "silueta", rec), key="db_grid_sil")
+                    with h2_:
+                        chart(viz.heatmap_dbscan_grid(g_, "%_ruido", rec), key="db_grid_noise")
+                    with st.expander("Tabla completa de la rejilla"):
+                        st.caption("**silueta** se calcula sin los puntos de ruido (lo "
+                                   "correcto para comparar clusters); **silueta_con_ruido** "
+                                   "trata el ruido como un grupo más, que es como se calcula "
+                                   "a veces en clase y da valores más bajos.")
+                        table(g_.sort_values("silueta", ascending=False, na_position="last"),
+                              height=380)
+                    with st.expander("Cambiar el rango de la rejilla"):
+                        e1, e2, e3, e4 = st.columns(4)
+                        e_min = e1.number_input("eps desde", 0.0, 10000.0,
+                                                float(g_["eps"].min()), key=wkey("g_emin"))
+                        e_max = e2.number_input("eps hasta", 0.0, 10000.0,
+                                                float(g_["eps"].max()), key=wkey("g_emax"))
+                        e_paso = e3.number_input("paso", 0.001, 100.0, 0.1, key=wkey("g_epaso"))
+                        ms_list = e4.multiselect("valores de min_samples", list(range(2, 31)),
+                                                 default=[3, 4, 5, 6, 8, 10],
+                                                 key=wkey("g_ms"))
+                        if st.button("Recalcular rejilla", key=wkey("btn_grid")):
+                            if e_max > e_min and ms_list:
+                                pasos = np.arange(e_min, e_max + e_paso / 2, e_paso)[:200]
+                                with st.spinner("Probando combinaciones…"):
+                                    clx["db_grid"] = clustering.dbscan_grid(
+                                        M, eps_values=np.round(pasos, 3),
+                                        min_samples_values=sorted(ms_list))
+                                st.rerun()
+                            else:
+                                st.error("Revisa el rango: 'hasta' debe ser mayor que "
+                                         "'desde' y elige al menos un min_samples.")
+
+                st.markdown("##### Modelo DBSCAN")
                 d1, d2 = st.columns(2)
-                d1.number_input("eps (radio)", 0.01, 100.0, step=0.05, format="%.3f",
-                                key=wkey("db_eps"),
-                                help=f"Sugerido por la curva k-distancia: {clx['eps_sug']:.3f}")
-                d2.number_input("min_samples", 2, 500, 5, key=wkey("db_ms"))
+                d1.number_input("eps (radio)", 0.0001, 10000.0, step=0.05, format="%.4f",
+                                key=wkey("db_eps"))
+                d2.number_input("min_samples", 2, 500, key=wkey("db_ms"))
                 db_eps = float(SS[wkey("db_eps")])
                 db_ms = int(SS[wkey("db_ms")])
-                chart(viz.line_kdistance(clx["kd"], db_eps), key="db_kd")
-                st.caption(f"El codo de esta curva sugiere eps ≈ **{clx['eps_sug']:.3f}**. "
-                           "Si subes eps, se fusionan grupos; si lo bajas, aumenta el ruido.")
+                with st.expander("Curva k-distancia (método alternativo para elegir eps)"):
+                    chart(viz.line_kdistance(clx["kd"], db_eps), key="db_kd")
+                    st.caption(f"El codo de esta curva sugiere eps ≈ **{clx['eps_sug']:.3f}**. "
+                               "Con muchas variables este método suele quedarse corto; la "
+                               "rejilla de arriba es más fiable.")
                 with st.spinner("Ajustando DBSCAN…"):
                     res_db = _db(M, ck, db_eps, db_ms)
                 if res_db.error:
@@ -1503,6 +1645,7 @@ with tabs[6]:
                         st.info("Más del 30% es ruido: considera subir eps un poco.")
                     _vistas(res_db.labels, "db")
                     _tamanos_y_centroides(res_db.labels, "db")
+                    _validar(res_db.labels, "db", "DBSCAN")
 
             # ---------------- ⑤ Jerárquico ----------------
             with sub[4]:
@@ -1533,9 +1676,21 @@ with tabs[6]:
                            + (f" El árbol se construye con {res_hc['n_muestra']:,} registros "
                               "y el resto se asigna al grupo más cercano."
                               if res_hc["n_muestra"] < len(M) else ""))
+                salto = clustering.dendrogram_jump_k(res_hc["Z"])
+                if salto.get("k"):
+                    def _usar_salto(k=salto["k"], tope=k_tope_h):
+                        SS[wkey("hc_k")] = int(min(max(k, 2), tope))
+                    j1, j2 = st.columns([4, 1])
+                    j1.info(f"**Criterio del salto más grande:** entre las alturas "
+                            f"{salto['altura_antes']:.2f} y {salto['altura_despues']:.2f} "
+                            f"está la mayor distancia entre fusiones consecutivas → sugiere "
+                            f"**k = {salto['k']}**.")
+                    j2.button(f"Usar k = {salto['k']}", on_click=_usar_salto,
+                              key=wkey("btn_salto"), disabled=salto["k"] < 2)
                 _kpis_cluster(res_hc["metricas"])
                 _vistas(res_hc["labels"], "hc")
                 _tamanos_y_centroides(res_hc["labels"], "hc")
+                _validar(res_hc["labels"], "hc", "Jerárquico")
 
             # ---------------- ⑥ PCA y t-SNE ----------------
             with sub[5]:
@@ -1630,18 +1785,31 @@ with tabs[6]:
                         filas.append({"algoritmo": nombre_a, "estado": "error",
                                       "detalle": r.error})
                         continue
-                    filas.append({"algoritmo": nombre_a, "estado": "ok",
-                                  "grupos": r.n_clusters, "ruido_%": r.metricas.get("%_ruido"),
-                                  "silueta": r.metricas.get("silueta"),
-                                  "davies_bouldin": r.metricas.get("davies_bouldin"),
-                                  "calinski_harabasz": r.metricas.get("calinski_harabasz"),
-                                  "parámetros": str(r.parametros)})
+                    fila = {"algoritmo": nombre_a, "estado": "ok",
+                            "grupos": r.n_clusters, "ruido_%": r.metricas.get("%_ruido"),
+                            "silueta": r.metricas.get("silueta"),
+                            "davies_bouldin": r.metricas.get("davies_bouldin"),
+                            "calinski_harabasz": r.metricas.get("calinski_harabasz")}
+                    if ref_vals is not None:
+                        v_ = clustering.external_validation(r.labels, ref_vals)
+                        fila[f"ARI vs {ref_col}"] = round(v_["ari"], 3)
+                        fila["acierto_%"] = round(v_["acierto"] * 100, 1)
+                    fila["parámetros"] = str(r.parametros)
+                    filas.append(fila)
                 comp = pd.DataFrame(filas)
                 if "silueta" in comp.columns:
                     comp = comp.sort_values("silueta", ascending=False,
                                             na_position="last").reset_index(drop=True)
                 st.markdown("#### Comparación de algoritmos")
                 table(comp)
+                if ref_vals is not None and f"ARI vs {ref_col}" in comp.columns:
+                    mejor_ari = comp.sort_values(f"ARI vs {ref_col}", ascending=False).iloc[0]
+                    st.info(f"Frente a la referencia **{ref_col}**, el que mejor recupera "
+                            f"los grupos reales es **{mejor_ari['algoritmo']}** "
+                            f"(ARI {mejor_ari[f'ARI vs {ref_col}']}, acierto "
+                            f"{mejor_ari['acierto_%']}%). La silueta mide separación "
+                            "geométrica; el ARI, coincidencia con la realidad: no siempre "
+                            "ganan los mismos.")
                 validos = [n for n, r in resultados.items()
                            if not r.error and r.n_clusters >= 1]
                 if (not comp.empty and "silueta" in comp.columns
@@ -1733,8 +1901,8 @@ with tabs[7]:
         st.markdown(f"<div class='card'><p>{md2html(insights.executive_summary(diag, score, tr, imp_df, cinfo))}</p></div>",
                     unsafe_allow_html=True)
 
-        sub = st.tabs(["Descriptivo", "Prescriptivo", "Simulador what-if",
-                       "Optimizador de decisiones"])
+        sub = pestañas(["Descriptivo", "Prescriptivo", "Simulador what-if",
+                       "Optimizador de decisiones"], "sub_insights")
 
         with sub[0]:
             obj = tr.target if tr is not None else None

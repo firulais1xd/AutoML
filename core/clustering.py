@@ -7,6 +7,7 @@ proyección 2D/3D (PCA, t-SNE, UMAP), perfilado de segmentos y narrativa.
 """
 from __future__ import annotations
 
+import re
 import warnings
 from dataclasses import dataclass, field
 from typing import Any
@@ -205,17 +206,20 @@ def _pseudo_inertia(M: np.ndarray, labels: np.ndarray) -> float:
 
 
 def _elbow_k(df: pd.DataFrame) -> int | None:
-    """Método del codo por máxima distancia a la recta (kneedle simplificado)."""
+    """
+    Codo = el k donde la caída de la inercia se frena más bruscamente
+    (mayor cambio de pendiente). No depende del rango de k probado, a diferencia
+    de los métodos de distancia a la recta.
+    """
     if len(df) < 3:
         return None
     x = df["k"].to_numpy(dtype=float)
     y = df["inercia"].to_numpy(dtype=float)
-    if not np.isfinite(y).all() or y.max() == y.min():
+    if not np.isfinite(y).all():
         return None
-    xn = (x - x.min()) / (x.max() - x.min())
-    yn = (y - y.min()) / (y.max() - y.min())
-    dist = np.abs(yn - (1 - xn))
-    return int(x[int(np.argmax(dist))])
+    caidas = y[:-1] - y[1:]                     # cuánto baja al pasar de k a k+1
+    frenazo = caidas[:-1] - caidas[1:]          # cuánto se reduce esa caída
+    return int(x[1:-1][int(np.argmax(frenazo))])
 
 
 def _sample_idx(n: int, max_n: int = 5000, seed: int = RANDOM_STATE) -> np.ndarray:
@@ -587,15 +591,50 @@ def assign_new(result: ClusterResult, M_new: np.ndarray) -> np.ndarray | None:
 # =========================================================================== #
 # Selección de variables clave
 # =========================================================================== #
+LABEL_NAME_RE = re.compile(
+    r"^(cultivar|clase|class|target|label|labels|etiqueta|objetivo|y|grupo|group|"
+    r"cluster|segmento|segment|categoria|category|especie|species|variedad|"
+    r"variety|outcome|resultado|diagnostico|diagnosis)(_?\d+)?$", re.IGNORECASE)
+
+
+def _nombre_normalizado(c) -> str:
+    import unicodedata
+    t = unicodedata.normalize("NFKD", str(c)).encode("ascii", "ignore").decode()
+    return re.sub(r"[^a-zA-Z0-9]+", "_", t).strip("_").lower()
+
+
+def is_label_like(df: pd.DataFrame, c) -> bool:
+    """
+    ¿La columna parece una etiqueta real (clase, cultivar, target...)?
+    Criterio: nombre de etiqueta y pocos valores distintos. Una columna así no
+    debe usarse para agrupar: sería darle la respuesta al algoritmo.
+    """
+    s = df[c]
+    nu = s.nunique(dropna=True)
+    if nu < 2 or nu > 20:
+        return False
+    return bool(LABEL_NAME_RE.search(_nombre_normalizado(c)))
+
+
+def detect_reference_column(df: pd.DataFrame) -> str | None:
+    """Primera columna con pinta de etiqueta real, para validar los clusters."""
+    for c in df.columns:
+        if is_label_like(df, c):
+            return c
+    return None
+
+
 def suggest_features(df: pd.DataFrame, roles: dict, exclude: list[str] | None = None,
-                     max_feats: int = 8, corr_thr: float = 0.85,
-                     include_categorical: bool = False) -> tuple[list[str], pd.DataFrame]:
+                     max_feats: int = 15, corr_thr: float = 0.85,
+                     include_categorical: bool = False,
+                     drop_redundant: bool = False) -> tuple[list[str], pd.DataFrame]:
     """
     Sugiere variables para segmentar y explica por qué entra o sale cada una.
 
-    Criterios: descarta identificadores, constantes, casi constantes, fechas y
-    texto libre; entre pares muy correlacionados (|r| > corr_thr) conserva uno;
-    ordena las restantes por variabilidad relativa (coeficiente de variación).
+    Descarta identificadores, constantes, casi constantes, fechas, texto libre,
+    columnas con pinta de etiqueta real (cultivar, clase, target…) y códigos
+    categóricos numéricos. Las variables muy correlacionadas se señalan; solo se
+    quitan si `drop_redundant=True`.
     """
     exclude = set(exclude or [])
     filas, candidatas = [], []
@@ -604,13 +643,17 @@ def suggest_features(df: pd.DataFrame, roles: dict, exclude: list[str] | None = 
         r = roles.get(c)
         rol = r.role if r is not None else "?"
         s = df[c]
+        nu = s.nunique(dropna=True)
         motivo = None
         if c in exclude:
-            motivo = "excluida manualmente (p. ej. es la variable objetivo)"
+            motivo = "excluida: es la variable objetivo o la de referencia"
         elif rol == "id":
             motivo = "identificador: agruparía por código, no por comportamiento"
         elif rol == "constante":
             motivo = "constante: no tiene variación"
+        elif is_label_like(df, c):
+            motivo = ("parece la etiqueta real (clase/grupo): úsala como referencia "
+                      "para validar, nunca para agrupar")
         elif rol == "fecha":
             motivo = "fecha: extrae año/mes en ETL si la quieres usar"
         elif rol == "texto":
@@ -631,37 +674,41 @@ def suggest_features(df: pd.DataFrame, roles: dict, exclude: list[str] | None = 
     num = [c for c in candidatas if is_numeric(df[c])]
     cat = [c for c in candidatas if c not in num]
 
-    # variabilidad relativa
     def cv(c):
-        s = pd.to_numeric(df[c], errors="coerce").dropna()
-        m = s.mean()
-        return float(abs(s.std() / m)) if len(s) > 1 and m not in (0, np.nan) and np.isfinite(m) and m != 0 \
-            else float(s.std() or 0)
+        v = pd.to_numeric(df[c], errors="coerce").dropna()
+        m = v.mean()
+        if len(v) < 2:
+            return 0.0
+        return float(abs(v.std() / m)) if m and np.isfinite(m) else float(v.std() or 0)
 
-    num_sorted = sorted(num, key=cv, reverse=True)
+    # se conserva el orden original del archivo (como harías a mano);
+    # la variabilidad solo decide qué queda fuera si hay más de max_feats
+    orden_cv = sorted(num, key=cv, reverse=True)
+    permitidas = set(orden_cv[:max_feats]) if len(orden_cv) > max_feats else set(orden_cv)
 
-    # redundancia
-    corr = df[num_sorted].corr().abs() if len(num_sorted) > 1 else pd.DataFrame()
+    corr = df[num].corr().abs() if len(num) > 1 else pd.DataFrame()
     elegidas: list[str] = []
-    for c in num_sorted:
+    for c in num:
         par = None
         for e in elegidas:
             if not corr.empty and corr.loc[c, e] > corr_thr:
                 par = (e, corr.loc[c, e])
                 break
-        if par:
-            filas.append({"variable": c, "rol": roles[c].role, "sugerida": False,
-                          "motivo": f"redundante con {par[0]} (r = {par[1]:.2f})"})
-        elif len(elegidas) >= max_feats:
+        if c not in permitidas:
             filas.append({"variable": c, "rol": roles[c].role, "sugerida": False,
                           "motivo": f"fuera del top {max_feats} por variabilidad"})
+        elif par and drop_redundant:
+            filas.append({"variable": c, "rol": roles[c].role, "sugerida": False,
+                          "motivo": f"redundante con {par[0]} (r = {par[1]:.2f})"})
         else:
             elegidas.append(c)
+            nota = (f"numérica · ojo: muy correlacionada con {par[0]} (r = {par[1]:.2f})"
+                    if par else f"numérica, variabilidad relativa {cv(c):.2f}")
             filas.append({"variable": c, "rol": roles[c].role, "sugerida": True,
-                          "motivo": f"numérica, variabilidad relativa {cv(c):.2f}"})
+                          "motivo": nota})
 
     for c in cat:
-        if include_categorical and len(elegidas) < max_feats + 3:
+        if include_categorical:
             elegidas.append(c)
             filas.append({"variable": c, "rol": roles[c].role, "sugerida": True,
                           "motivo": f"categórica con {df[c].nunique()} niveles"})
@@ -670,8 +717,121 @@ def suggest_features(df: pd.DataFrame, roles: dict, exclude: list[str] | None = 
                           "motivo": "categórica (no incluida)"})
 
     tabla = pd.DataFrame(filas)
-    tabla = tabla.sort_values(["sugerida", "variable"], ascending=[False, True]).reset_index(drop=True)
+    orden = {c: i for i, c in enumerate(df.columns)}
+    tabla["_o"] = tabla["variable"].map(orden)
+    tabla = (tabla.sort_values(["sugerida", "_o"], ascending=[False, True])
+             .drop(columns="_o").reset_index(drop=True))
     return elegidas, tabla
+
+
+# =========================================================================== #
+# Validación externa contra una etiqueta real
+# =========================================================================== #
+def external_validation(labels: np.ndarray, reference) -> dict:
+    """
+    Compara los clusters contra una etiqueta real que NO se usó para agrupar.
+
+    - ARI (Adjusted Rand Index): 1 = coincidencia perfecta, 0 = azar.
+    - NMI: información mutua normalizada (0 a 1).
+    - Tasa de acierto: mejor emparejamiento cluster → clase (método húngaro);
+      el ruido de DBSCAN cuenta como una categoría propia.
+    """
+    from scipy.optimize import linear_sum_assignment
+    from sklearn.metrics import adjusted_rand_score, normalized_mutual_info_score
+
+    ref = pd.Series(reference).astype(str).to_numpy()
+    lab = np.asarray(labels)
+    tabla = pd.crosstab(pd.Series(lab, name="cluster"), pd.Series(ref, name="referencia"))
+    filas, cols = linear_sum_assignment(-tabla.to_numpy())
+    aciertos = int(tabla.to_numpy()[filas, cols].sum())
+    emparejamiento = {int(tabla.index[f]): str(tabla.columns[c]) for f, c in zip(filas, cols)}
+    return {
+        "ari": float(adjusted_rand_score(ref, lab)),
+        "nmi": float(normalized_mutual_info_score(ref, lab)),
+        "acierto": aciertos / max(len(lab), 1),
+        "tabla": tabla,
+        "emparejamiento": emparejamiento,
+    }
+
+
+# =========================================================================== #
+# DBSCAN: búsqueda en rejilla de eps × min_samples
+# =========================================================================== #
+def dbscan_grid(M: np.ndarray, eps_values=None, min_samples_values=(3, 4, 5, 6, 8, 10),
+                max_rows: int = 3000, random_state: int = RANDOM_STATE) -> pd.DataFrame:
+    """
+    Prueba combinaciones de eps y min_samples y mide grupos, ruido y silueta
+    (la silueta se calcula sin los puntos de ruido).
+    """
+    idx = _sample_idx(len(M), max_rows, random_state)
+    sub = M[idx]
+    if eps_values is None:
+        kd = kdistance_curve(sub, 5)["distancia"].to_numpy()
+        lo = float(np.percentile(kd, 2) * 0.7)
+        hi = float(np.percentile(kd, 99) * 1.6)
+        if not np.isfinite(lo) or hi <= lo:
+            lo, hi = 0.1, 2.0
+        eps_values = np.round(np.linspace(lo, hi, 36), 3)
+    filas = []
+    for eps in eps_values:
+        for ms in min_samples_values:
+            if ms >= len(sub):
+                continue
+            lab = DBSCAN(eps=float(eps), min_samples=int(ms), n_jobs=-1).fit_predict(sub)
+            n_cl = len(set(lab.tolist()) - {-1})
+            ruido = int((lab == -1).sum())
+            sil, sil_con = None, None
+            mask = lab != -1
+            if n_cl >= 2 and mask.sum() > n_cl:
+                try:
+                    sil = float(silhouette_score(sub[mask], lab[mask]))
+                except Exception:
+                    sil = None
+            # variante "ruido como un grupo más" (la que se calcula a veces en clase)
+            if len(set(lab.tolist())) >= 2 and len(set(lab.tolist())) < len(sub):
+                try:
+                    sil_con = float(silhouette_score(sub, lab))
+                except Exception:
+                    sil_con = None
+            filas.append({"eps": round(float(eps), 3), "min_samples": int(ms),
+                          "clusters": n_cl, "ruido": ruido,
+                          "%_ruido": round(ruido / len(sub) * 100, 1),
+                          "silueta": round(sil, 4) if sil is not None else None,
+                          "silueta_con_ruido": round(sil_con, 4) if sil_con is not None else None})
+    return pd.DataFrame(filas)
+
+
+def recommend_dbscan(grid: pd.DataFrame, max_noise_pct: float = 20.0,
+                     min_noise_pct: float = 0.5) -> dict | None:
+    """
+    Mejor silueta entre las combinaciones con al menos 2 grupos y un ruido
+    razonable (ni cero —DBSCAN no estaría detectando atípicos— ni excesivo).
+    """
+    if grid is None or grid.empty:
+        return None
+    ok = grid[(grid["clusters"] >= 2) & grid["silueta"].notna()]
+    rango = ok[(ok["%_ruido"] <= max_noise_pct) & (ok["%_ruido"] >= min_noise_pct)]
+    base = rango if not rango.empty else ok[ok["%_ruido"] <= max_noise_pct]
+    if base.empty:
+        base = ok
+    if base.empty:
+        return None
+    mejor = base.sort_values(["silueta", "%_ruido"], ascending=[False, True]).iloc[0]
+    return {"eps": float(mejor["eps"]), "min_samples": int(mejor["min_samples"]),
+            "clusters": int(mejor["clusters"]), "%_ruido": float(mejor["%_ruido"]),
+            "silueta": float(mejor["silueta"])}
+
+
+def dendrogram_jump_k(Z) -> dict:
+    """Criterio del salto más grande entre alturas consecutivas de fusión."""
+    alturas = np.asarray(Z)[:, 2]
+    if len(alturas) < 2:
+        return {"k": None}
+    saltos = np.diff(alturas)
+    i = int(np.argmax(saltos))
+    n = len(alturas) + 1
+    return {"k": int(n - (i + 1)), "altura_antes": float(alturas[i]),
+            "altura_despues": float(alturas[i + 1]), "salto": float(saltos[i])}
 
 
 def hopkins(M: np.ndarray, sample_frac: float = 0.1, max_m: int = 300,

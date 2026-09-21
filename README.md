@@ -191,10 +191,18 @@ Eliges tus **variables clave**, pulsas **Analizar clusters** una vez y recorres 
 secciones. Los parámetros de cada algoritmo se ajustan en vivo, sin recalcular todo.
 
 **Selección de variables clave**
-- Botones rápidos: **✨ Sugeridas** (numéricas no redundantes y con más variabilidad;
-  excluye identificadores, constantes y la variable objetivo), **🔢 Todas las
-  numéricas**, **⭐ Top del modelo** (las 8 más importantes del mejor modelo entrenado)
-  y **🧹 Limpiar**. Luego agregas o quitas las que tú consideres clave.
+- Botones rápidos: **✨ Sugeridas** (todas las numéricas útiles; excluye
+  identificadores, constantes, la variable objetivo y cualquier columna con pinta de
+  etiqueta real como `cultivar`, `clase` o `target`), **🔢 Todas las numéricas**,
+  **⭐ Top del modelo** (las 8 más importantes del mejor modelo entrenado) y
+  **🧹 Limpiar**. Luego agregas o quitas las que tú consideres clave.
+- Las variables muy correlacionadas se señalan; con la casilla *Quitar redundantes* se
+  descartan.
+- **Variable de referencia (opcional):** una etiqueta real que no participa en el
+  agrupamiento. Si la eliges, cada algoritmo se valida contra ella con **ARI**, **NMI**,
+  **tasa de acierto** (mejor emparejamiento cluster → clase) y **tabla cruzada**. La
+  app la detecta sola cuando el nombre lo sugiere y avisa si la metes por error entre
+  las variables para agrupar.
 - Tabla que explica **por qué se sugiere o no cada variable**.
 
 **Las siete secciones**
@@ -207,12 +215,13 @@ secciones. Los parámetros de cada algoritmo se ajustan en vivo, sin recalcular 
 3. **K-Means** — eliges k; ves silueta, Davies-Bouldin e inercia, el mapa en **PCA y
    t-SNE** lado a lado, tamaño de cada grupo, promedio de cada variable por grupo en
    sus unidades originales y silueta por registro.
-4. **DBSCAN** — `eps` sugerido automáticamente con la **curva k-distancia**, y
-   `min_samples`; muestra cuántos grupos encontró y cuánto quedó como ruido, con
-   consejos si todo cae en ruido o en un solo grupo.
+4. **DBSCAN** — **búsqueda en rejilla de eps × min_samples** con mapas de calor de
+   silueta y de ruido, y una recomendación (la mejor silueta con un ruido máximo que
+   tú fijas). La tabla muestra la silueta sin ruido y con el ruido como un grupo más.
+   La curva k-distancia queda como método alternativo.
 5. **Árbol jerárquico** — **dendrograma** con las ramas coloreadas por grupo y la
    línea de corte; eliges el método de enlace (Ward, completo, promedio, simple) y el
-   número de grupos.
+   número de grupos. El **criterio del salto más grande** entre fusiones sugiere k.
 6. **PCA y t-SNE** — varianza explicada por componente y acumulada, **cargas** (qué
    variables forman cada eje), la forma natural de los datos sin agrupar, y una
    **cuadrícula comparativa: K-Means, DBSCAN y Jerárquico, cada uno en PCA y en
