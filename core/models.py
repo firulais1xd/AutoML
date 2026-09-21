@@ -598,7 +598,11 @@ def confusion(y_true, y_pred, labels=None) -> np.ndarray:
 
 
 def report_table(y_true, y_pred, class_names=None) -> pd.DataFrame:
-    rep = classification_report(y_true, y_pred, target_names=class_names,
+    # Se pasan todas las etiquetas explícitamente: con pocos datos el conjunto de
+    # prueba puede no contener todas las clases y sklearn fallaría.
+    labels = list(range(len(class_names))) if class_names else None
+    rep = classification_report(y_true, y_pred, labels=labels,
+                                target_names=class_names,
                                 output_dict=True, zero_division=0)
     df = pd.DataFrame(rep).T.round(4)
     df.index.name = "clase"
@@ -606,6 +610,14 @@ def report_table(y_true, y_pred, class_names=None) -> pd.DataFrame:
 
 
 def roc_data(y_true, y_proba, n_classes: int, class_names=None) -> list[dict]:
+    """Curvas ROC; omite las clases que no aparecen en el conjunto de prueba."""
+    try:
+        return _roc_data(y_true, y_proba, n_classes, class_names)
+    except Exception:
+        return []
+
+
+def _roc_data(y_true, y_proba, n_classes: int, class_names=None) -> list[dict]:
     out = []
     if n_classes == 2:
         p = y_proba[:, 1] if y_proba.ndim > 1 else y_proba
@@ -615,6 +627,8 @@ def roc_data(y_true, y_proba, n_classes: int, class_names=None) -> list[dict]:
     else:
         for i in range(n_classes):
             yb = (np.asarray(y_true) == i).astype(int)
+            if yb.sum() in (0, len(yb)):
+                continue            # clase ausente en el conjunto de prueba
             fpr, tpr, _ = roc_curve(yb, y_proba[:, i])
             nombre = class_names[i] if class_names else str(i)
             out.append({"clase": nombre, "fpr": fpr, "tpr": tpr,
@@ -623,6 +637,14 @@ def roc_data(y_true, y_proba, n_classes: int, class_names=None) -> list[dict]:
 
 
 def pr_data(y_true, y_proba, n_classes: int, class_names=None) -> list[dict]:
+    """Curvas Precisión-Recall; omite clases ausentes en el conjunto de prueba."""
+    try:
+        return _pr_data(y_true, y_proba, n_classes, class_names)
+    except Exception:
+        return []
+
+
+def _pr_data(y_true, y_proba, n_classes: int, class_names=None) -> list[dict]:
     out = []
     if n_classes == 2:
         p = y_proba[:, 1] if y_proba.ndim > 1 else y_proba
@@ -632,6 +654,8 @@ def pr_data(y_true, y_proba, n_classes: int, class_names=None) -> list[dict]:
     else:
         for i in range(n_classes):
             yb = (np.asarray(y_true) == i).astype(int)
+            if yb.sum() in (0, len(yb)):
+                continue
             pr, rc, _ = precision_recall_curve(yb, y_proba[:, i])
             nombre = class_names[i] if class_names else str(i)
             out.append({"clase": nombre, "precision": pr, "recall": rc,

@@ -379,9 +379,14 @@ def project(M: np.ndarray, method: str = "PCA", n_components: int = 2,
             perplexity: float = 30.0) -> tuple[pd.DataFrame, dict]:
     """Reduce a 2D/3D para graficar los clusters."""
     info: dict[str, Any] = {"metodo": method}
-    n_components = int(min(n_components, M.shape[1], max(2, M.shape[1])))
+    pedidas = int(n_components)
+    # PCA/UMAP no pueden devolver más componentes que variables o registros
+    n_components = int(max(1, min(pedidas, M.shape[1], len(M))))
+    if method == "t-SNE" and len(M) < 8:
+        method = "PCA"          # t-SNE necesita más puntos que la perplejidad
+        info["aviso"] = "Muy pocos registros para t-SNE: se muestra PCA."
     if method == "t-SNE":
-        per = float(max(5, min(perplexity, (len(M) - 1) / 3)))
+        per = float(min(max(2.0, min(perplexity, (len(M) - 1) / 3)), len(M) - 1))
         red = TSNE(n_components=min(n_components, 3), random_state=random_state,
                    perplexity=per, init="pca", learning_rate="auto")
         emb = red.fit_transform(M)
@@ -398,6 +403,15 @@ def project(M: np.ndarray, method: str = "PCA", n_components: int = 2,
             float(red.explained_variance_ratio_.sum() * 100), 2)
         info["loadings"] = red.components_
         info["metodo"] = "PCA"
+    emb = np.asarray(emb, dtype=float)
+    if emb.ndim == 1:
+        emb = emb.reshape(-1, 1)
+    # Con una sola variable hay una sola dimensión: se rellena con ceros para
+    # que los mapas 2D/3D sigan funcionando.
+    if emb.shape[1] < pedidas:
+        emb = np.hstack([emb, np.zeros((len(emb), pedidas - emb.shape[1]))])
+        info["aviso"] = info.get("aviso") or ("Solo hay una dimensión: el segundo "
+                                              "eje es constante.")
     cols = [f"Dim {i+1}" for i in range(emb.shape[1])]
     return pd.DataFrame(emb, columns=cols), info
 
