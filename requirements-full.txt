@@ -1,0 +1,7 @@
+# AutoML Studio — instalación local completa.
+# Incluye todo lo de requirements.txt más las librerías pesadas que conviene
+# omitir en Streamlit Community Cloud por límites de memoria.
+-r requirements.txt
+
+catboost>=1.2          # un modelo más en la comparación
+umap-learn>=0.5        # proyección UMAP en la pestaña de Clusters
